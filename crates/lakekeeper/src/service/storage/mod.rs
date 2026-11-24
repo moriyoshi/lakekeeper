@@ -1184,6 +1184,10 @@ impl StorageProfile {
         io: &impl LakekeeperStorage,
         test_location: &Location,
     ) -> Result<(), ValidationError> {
+        // A Cloud Storage emulator accepts any token, so vended credentials cannot be scoped.
+        if matches!(self, Self::Gcs(_)) && gcs::emulator_configured() {
+            return Ok(());
+        }
         let compression_codec = CompressionCodec::Gzip;
 
         let mut test_file_write = self.default_metadata_location(

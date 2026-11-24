@@ -178,19 +178,9 @@ impl GcsProfile {
     /// # Errors
     /// - Fails if the bucket name is invalid.
     /// - Fails if the key prefix is too long.
-    /// - Fails if STS is enabled while Lakekeeper uses a Cloud Storage emulator.
     pub(super) fn normalize(&mut self) -> Result<(), ValidationError> {
         validate_bucket_name(&self.bucket)?;
         self.normalize_key_prefix()?;
-        if self.sts_enabled && gcs_emulator().is_some() {
-            return Err(InvalidProfileError {
-                source: None,
-                reason: "Storage Profile `sts-enabled` must be false: this Lakekeeper uses a Cloud Storage emulator (LAKEKEEPER__GCS_EMULATOR_ENDPOINT), which cannot vend credentials.".to_string(),
-                entity: "sts_enabled".to_string(),
-            }
-            .into());
-        }
-
         Ok(())
     }
 
@@ -311,6 +301,10 @@ impl GcsProfile {
                 credentials_expiration_ms: None,
                 remote_signing: None,
             });
+        }
+
+        if gcs_emulator().is_some() {
+            return Ok(emulator_table_config(table_properties));
         }
 
         let cache_key = STCCacheKey::new(stc_request.clone(), self.into(), Some(credential.into()));
@@ -513,6 +507,27 @@ pub(super) async fn lakekeeper_io_from_vended_table_config(
 /// Settings of all GCS clients. With a Cloud Storage emulator, clients send requests to it.
 fn gcs_settings() -> GCSSettings {
     GCSSettings::builder().emulator(gcs_emulator()).build()
+}
+
+/// The token vended for STS-enabled profiles while a Cloud Storage emulator is configured.
+const EMULATOR_TOKEN: &str = "emulator";
+
+/// The table configuration of an STS-enabled profile with a Cloud Storage emulator. The
+/// emulator accepts any token: a placeholder, rather than an STS downscope, serves the clients
+/// that need one, such as the console's query engine.
+fn emulator_table_config(mut table_properties: TableProperties) -> TableConfig {
+    table_properties.insert(&gcs::Token(EMULATOR_TOKEN.to_string()));
+    TableConfig {
+        config: table_properties.clone(),
+        creds: table_properties,
+        credentials_expiration_ms: None,
+        remote_signing: None,
+    }
+}
+
+/// Whether a Cloud Storage emulator is configured.
+pub(super) fn emulator_configured() -> bool {
+    gcs_emulator().is_some()
 }
 
 /// The Cloud Storage emulator from the configuration, if one is set.
