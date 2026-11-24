@@ -134,6 +134,8 @@ pub mod gcs {
             Token, String, "gcs.oauth2.token", "gcs_oauth2_token";
             TokenExpiresAt, String, "gcs.oauth2.token-expires-at", "gcs_oauth2_token_expires_at";
             RefreshCredentialsEndpoint, String, "gcs.oauth2.refresh-credentials-endpoint", "gcs_oauth2_refresh_credentials_endpoint";
+            ServiceHost, String, "gcs.service.host", "gcs_service_host";
+            NoAuth, bool, "gcs.no-auth", "gcs_no_auth";
         }
     );
 }
