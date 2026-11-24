@@ -17,7 +17,7 @@ pub use gcs_auth::{
 };
 pub use gcs_location::{GcsLocation, InvalidGCSBucketName, validate_bucket_name};
 pub use gcs_storage::GcsStorage;
-use google_cloud_auth::credentials::Credentials;
+use google_cloud_auth::credentials::{Credentials, anonymous};
 use google_cloud_gax::retry_policy::RetryPolicyExt as _;
 use google_cloud_storage::{
     client::{Storage, StorageControl},
@@ -70,7 +70,21 @@ static CLIENT_CACHE: LazyLock<moka::future::Cache<String, GcsStorage>> = LazyLoc
 });
 
 #[derive(Debug, Eq, Clone, PartialEq, typed_builder::TypedBuilder)]
-pub struct GCSSettings {}
+pub struct GCSSettings {
+    /// Cloud Storage emulator that receives all requests. Requests to it carry no
+    /// credentials, and the authentication passed to [`Self::get_storage_client`] is not used.
+    #[builder(default)]
+    pub emulator: Option<GcsEndpoints>,
+}
+
+/// Endpoints of a Cloud Storage service other than Google's, such as an emulator.
+#[derive(Debug, Eq, Clone, PartialEq, Hash)]
+pub struct GcsEndpoints {
+    /// Endpoint of the JSON API, which transfers object data. Example: `http://localhost:9000`.
+    pub http: String,
+    /// Endpoint of the gRPC API, which reads, lists and deletes object metadata.
+    pub grpc: String,
+}
 
 impl GCSSettings {
     /// Create a new GCS client with the provided authentication method.
@@ -81,18 +95,33 @@ impl GCSSettings {
         &self,
         auth: &GcsAuth,
     ) -> Result<GcsStorage, InitializeClientError> {
+        let cache_key = match &self.emulator {
+            Some(emulator) => Some(format!("emulator:{}|{}", emulator.http, emulator.grpc)),
+            None => client_cache_key(auth),
+        };
         // The SDK builders produce large futures; boxing keeps the callers' futures small.
-        let Some(cache_key) = client_cache_key(auth) else {
-            return Box::pin(build_clients(auth.credentials()?, None)).await;
+        let Some(cache_key) = cache_key else {
+            return Box::pin(self.build_clients(auth)).await;
         };
         Box::pin(CLIENT_CACHE.try_get_with(cache_key, async {
-            Box::pin(build_clients(auth.credentials()?, None)).await
+            Box::pin(self.build_clients(auth)).await
         }))
         .await
         .map_err(|e: Arc<InitializeClientError>| InitializeClientError {
             reason: e.reason.clone(),
             source: Some(Box::new(e)),
         })
+    }
+
+    async fn build_clients(&self, auth: &GcsAuth) -> Result<GcsStorage, InitializeClientError> {
+        match &self.emulator {
+            // storage-testbench accepts only two-part single-request uploads, and the SDK
+            // adds a third part with checksums. Resumable uploads work with it.
+            Some(emulator) => {
+                build_clients(anonymous::Builder::new().build(), Some(emulator), 0).await
+            }
+            None => build_clients(auth.credentials()?, None, RESUMABLE_UPLOAD_THRESHOLD).await,
+        }
     }
 }
 
@@ -105,13 +134,15 @@ fn client_cache_key(auth: &GcsAuth) -> Option<String> {
     }
 }
 
-/// Builds the data client (HTTP) and the metadata client (gRPC) of a [`GcsStorage`].
+/// Builds the data client (HTTP) and the metadata client (gRPC) of a [`GcsStorage`]. The data
+/// client uploads objects of at least `resumable_upload_threshold` bytes with a resumable upload.
 ///
 /// The credentials start fetching their token in the background. Object storage connections
 /// are opened on first use.
 pub(crate) async fn build_clients(
     credentials: Credentials,
-    endpoint: Option<&str>,
+    endpoints: Option<&GcsEndpoints>,
+    resumable_upload_threshold: usize,
 ) -> Result<GcsStorage, InitializeClientError> {
     let mut storage_builder = Storage::builder()
         .with_credentials(credentials.clone())
@@ -121,10 +152,10 @@ pub(crate) async fn build_clients(
                 .with_time_limit(RETRY_TIME_LIMIT),
         )
         .with_read_resume_policy(Recommended.with_attempt_limit(MAX_ATTEMPTS))
-        .with_resumable_upload_threshold(RESUMABLE_UPLOAD_THRESHOLD)
+        .with_resumable_upload_threshold(resumable_upload_threshold)
         .with_resumable_upload_buffer_size(CHUNK_SIZE);
-    if let Some(endpoint) = endpoint {
-        storage_builder = storage_builder.with_endpoint(endpoint);
+    if let Some(endpoints) = endpoints {
+        storage_builder = storage_builder.with_endpoint(&endpoints.http);
     }
     let storage = storage_builder
         .build()
@@ -134,10 +165,11 @@ pub(crate) async fn build_clients(
             source: Some(Box::new(e)),
         })?;
 
-    let control = build_control(&credentials, endpoint).await?;
+    let grpc_endpoint = endpoints.map(|endpoints| endpoints.grpc.as_str());
+    let control = build_control(&credentials, grpc_endpoint).await?;
     Ok(GcsStorage::new(
         storage,
-        ControlClient::new(control, credentials, endpoint.map(str::to_string)),
+        ControlClient::new(control, credentials, grpc_endpoint.map(str::to_string)),
     ))
 }
 
@@ -225,6 +257,14 @@ mod tests {
         }
     }
 
+    /// Endpoints that serve both APIs at `endpoint`.
+    pub(crate) fn endpoints(endpoint: &str) -> GcsEndpoints {
+        GcsEndpoints {
+            http: endpoint.to_string(),
+            grpc: endpoint.to_string(),
+        }
+    }
+
     #[test]
     fn bearer_token_clients_are_not_cached() {
         let auth = GcsAuth::BearerToken(GcsBearerTokenAuth {
@@ -259,7 +299,22 @@ mod tests {
     // with both ring and aws-lc-rs, this panics unless tonic's `tls-aws-lc` feature is active.
     #[tokio::test]
     async fn build_clients_https_does_not_panic() {
-        build_clients(anonymous::Builder::new().build(), Some(ENDPOINT))
+        build_clients(
+            anonymous::Builder::new().build(),
+            Some(&endpoints(ENDPOINT)),
+            RESUMABLE_UPLOAD_THRESHOLD,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn emulator_clients_do_not_load_credentials() {
+        let settings = GCSSettings::builder()
+            .emulator(Some(endpoints(ENDPOINT)))
+            .build();
+        settings
+            .get_storage_client(&service_account("not a key"))
             .await
             .unwrap();
     }

@@ -10,7 +10,7 @@ use iceberg_ext::configs::table::{TableProperties, creds, gcs};
 use lakekeeper_io::{
     InvalidLocationError, Location,
     gcs::{
-        GCSSettings, GcsAccessToken, GcsAuth, GcsServiceAccountKey, GcsStorage,
+        GCSSettings, GcsAccessToken, GcsAuth, GcsEndpoints, GcsServiceAccountKey, GcsStorage,
         system_identity_project_id, validate_bucket_name,
     },
 };
@@ -167,8 +167,7 @@ impl GcsProfile {
         credential: &GcsCredential,
     ) -> Result<GcsStorage, CredentialsError> {
         let gcs_auth = GcsAuth::try_from(credential.clone())?;
-        let settings = GCSSettings {};
-        settings
+        gcs_settings()
             .get_storage_client(&gcs_auth)
             .await
             .map_err(Into::into)
@@ -179,9 +178,18 @@ impl GcsProfile {
     /// # Errors
     /// - Fails if the bucket name is invalid.
     /// - Fails if the key prefix is too long.
+    /// - Fails if STS is enabled while Lakekeeper uses a Cloud Storage emulator.
     pub(super) fn normalize(&mut self) -> Result<(), ValidationError> {
         validate_bucket_name(&self.bucket)?;
         self.normalize_key_prefix()?;
+        if self.sts_enabled && gcs_emulator().is_some() {
+            return Err(InvalidProfileError {
+                source: None,
+                reason: "Storage Profile `sts-enabled` must be false: this Lakekeeper uses a Cloud Storage emulator (LAKEKEEPER__GCS_EMULATOR_ENDPOINT), which cannot vend credentials.".to_string(),
+                entity: "sts_enabled".to_string(),
+            }
+            .into());
+        }
 
         Ok(())
     }
@@ -286,6 +294,11 @@ impl GcsProfile {
     ) -> Result<TableConfig, TableConfigError> {
         let mut table_properties = TableProperties::default();
 
+        if let Some(emulator) = gcs_emulator() {
+            table_properties.insert(&gcs::ServiceHost(emulator.http));
+            table_properties.insert(&gcs::NoAuth(true));
+        }
+
         if !data_access.provide_credentials() || !self.sts_enabled {
             tracing::debug!(
                 "Not providing GCS credentials - provide_credentials: {}, sts_enabled: {}",
@@ -293,7 +306,7 @@ impl GcsProfile {
                 self.sts_enabled
             );
             return Ok(TableConfig {
-                creds: table_properties.clone(),
+                creds: TableProperties::default(),
                 config: table_properties,
                 credentials_expiration_ms: None,
                 remote_signing: None,
@@ -491,10 +504,26 @@ pub(super) async fn lakekeeper_io_from_vended_table_config(
         }
     })?;
     let auth = GcsAuth::BearerToken(lakekeeper_io::gcs::GcsBearerTokenAuth { access_token });
-    GCSSettings {}
+    gcs_settings()
         .get_storage_client(&auth)
         .await
         .map_err(Into::into)
+}
+
+/// Settings of all GCS clients. With a Cloud Storage emulator, clients send requests to it.
+fn gcs_settings() -> GCSSettings {
+    GCSSettings::builder().emulator(gcs_emulator()).build()
+}
+
+/// The Cloud Storage emulator from the configuration, if one is set.
+fn gcs_emulator() -> Option<GcsEndpoints> {
+    let http = CONFIG.gcs_emulator_endpoint.as_ref()?;
+    let grpc = CONFIG.gcs_emulator_grpc_endpoint.as_ref().unwrap_or(http);
+    // The SDK appends paths to the endpoint, so it must not end with a slash.
+    Some(GcsEndpoints {
+        http: http.as_str().trim_end_matches('/').to_string(),
+        grpc: grpc.as_str().trim_end_matches('/').to_string(),
+    })
 }
 
 impl TryFrom<GcsCredential> for GcsAuth {

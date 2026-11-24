@@ -86,6 +86,7 @@ pub(crate) fn get_config() -> DynAppConfig {
     validate_openid_provider_ids(&config);
     validate_required_claims(&config);
     validate_task_drain(&config);
+    validate_gcs_emulator(&config);
 
     if !config.openid_providers.is_empty() && config.openid_provider_uri.is_none() {
         tracing::warn!(
@@ -244,6 +245,21 @@ fn validate_openid_provider_ids(config: &DynAppConfig) {
         assert!(
             idp_id != OIDC_IDP_ID,
             "Invalid OIDC provider '{idp_id}': IdP ID '{OIDC_IDP_ID}' is reserved"
+        );
+    }
+}
+
+/// The emulator settings are complete, and a configured emulator is logged.
+fn validate_gcs_emulator(config: &DynAppConfig) {
+    assert!(
+        config.gcs_emulator_grpc_endpoint.is_none() || config.gcs_emulator_endpoint.is_some(),
+        "LAKEKEEPER__GCS_EMULATOR_GRPC_ENDPOINT is set, but LAKEKEEPER__GCS_EMULATOR_ENDPOINT \
+         is not. Set LAKEKEEPER__GCS_EMULATOR_ENDPOINT too."
+    );
+    if let Some(endpoint) = &config.gcs_emulator_endpoint {
+        tracing::warn!(
+            "All GCS requests go to the emulator at {endpoint} without credentials \
+             (LAKEKEEPER__GCS_EMULATOR_ENDPOINT). For testing only."
         );
     }
 }
@@ -636,6 +652,13 @@ pub struct DynAppConfig {
 
     /// Enable GCP System Identities
     pub(crate) enable_gcp_system_credentials: bool,
+    /// Cloud Storage emulator, such as `storage-testbench`, that receives all GCS requests.
+    /// Requests carry no credentials, and GCS warehouses cannot vend credentials. For
+    /// testing only.
+    pub(crate) gcs_emulator_endpoint: Option<Url>,
+    /// gRPC endpoint of the Cloud Storage emulator, if it differs from
+    /// `gcs_emulator_endpoint`.
+    pub(crate) gcs_emulator_grpc_endpoint: Option<Url>,
 
     // ------------- TRACING CLOUDEVENTS ----------
     pub log_cloudevents: Option<bool>,
@@ -1551,6 +1574,8 @@ impl Default for DynAppConfig {
             s3_enable_direct_system_credentials: false,
             s3_require_external_id_for_system_credentials: true,
             enable_gcp_system_credentials: false,
+            gcs_emulator_endpoint: None,
+            gcs_emulator_grpc_endpoint: None,
             log_cloudevents: None,
             authz_backend: AuthZBackend::default(),
             instance_admins: HashSet::new(),

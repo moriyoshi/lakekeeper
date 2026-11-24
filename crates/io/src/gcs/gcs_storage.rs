@@ -608,7 +608,7 @@ mod tests {
     use super::*;
     use crate::{
         delete_limit::{DeleteEndpoint, DeleteLimit},
-        gcs::{UPLOAD_TIMEOUT, build_clients},
+        gcs::{RESUMABLE_UPLOAD_THRESHOLD, UPLOAD_TIMEOUT, build_clients, tests::endpoints},
     };
 
     const PATH: &str = "gs://test-bucket/object";
@@ -619,9 +619,13 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let app = axum::Router::new().fallback(std::future::pending::<()>);
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        build_clients(anonymous::Builder::new().build(), Some(&endpoint))
-            .await
-            .unwrap()
+        build_clients(
+            anonymous::Builder::new().build(),
+            Some(&endpoints(&endpoint)),
+            RESUMABLE_UPLOAD_THRESHOLD,
+        )
+        .await
+        .unwrap()
     }
 
     /// Storage whose endpoint answers every gRPC request with `NOT_FOUND`, which a delete
@@ -641,9 +645,13 @@ mod tests {
             }
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let storage = build_clients(anonymous::Builder::new().build(), Some(&endpoint))
-            .await
-            .unwrap();
+        let storage = build_clients(
+            anonymous::Builder::new().build(),
+            Some(&endpoints(&endpoint)),
+            RESUMABLE_UPLOAD_THRESHOLD,
+        )
+        .await
+        .unwrap();
         (storage, requests)
     }
 
@@ -736,9 +744,13 @@ mod tests {
             }
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let storage = build_clients(anonymous::Builder::new().build(), Some(&endpoint))
-            .await
-            .unwrap();
+        let storage = build_clients(
+            anonymous::Builder::new().build(),
+            Some(&endpoints(&endpoint)),
+            RESUMABLE_UPLOAD_THRESHOLD,
+        )
+        .await
+        .unwrap();
         (storage, uploads)
     }
 

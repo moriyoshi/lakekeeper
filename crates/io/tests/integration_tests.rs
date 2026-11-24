@@ -173,7 +173,7 @@ async fn create_gcs_storage(bucket_env_var: &str) -> anyhow::Result<(StorageBack
     let key: lakekeeper_io::gcs::GcsServiceAccountKey = serde_json::from_str(&credential)
         .map_err(|e| anyhow::anyhow!("Failed to parse GCS service account key: {e}"))?;
 
-    let settings = lakekeeper_io::gcs::GCSSettings {};
+    let settings = lakekeeper_io::gcs::GCSSettings::builder().build();
     let auth = lakekeeper_io::gcs::GcsAuth::ServiceAccountKey { key };
 
     let storage = StorageBackend::Gcs(
